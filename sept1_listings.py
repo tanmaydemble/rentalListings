@@ -1,0 +1,77 @@
+import argparse
+import os
+
+import pandas as pd
+import requests
+
+API_ENDPOINT = "https://app.scrapeak.com/v1/scrapers/zillow/listing"
+LISTING_URL = "https://www.zillow.com/homes/for_rent/?searchQueryState=%7B%22mapBounds%22%3A%7B%22west%22%3A-71.14007799772557%2C%22east%22%3A-71.09412100227442%2C%22south%22%3A42.280931197058244%2C%22north%22%3A42.33774778867289%7D%2C%22regionSelection%22%3A%5B%7B%22regionId%22%3A154795%2C%22regionType%22%3A8%7D%5D%2C%22filterState%22%3A%7B%22isForSaleByAgent%22%3A%7B%22value%22%3Afalse%7D%2C%22isComingSoon%22%3A%7B%22value%22%3Afalse%7D%2C%22isAuction%22%3A%7B%22value%22%3Afalse%7D%2C%22isForSaleForeclosure%22%3A%7B%22value%22%3Afalse%7D%2C%22isNewConstruction%22%3A%7B%22value%22%3Afalse%7D%2C%22isForSaleByOwner%22%3A%7B%22value%22%3Afalse%7D%2C%22isForRent%22%3A%7B%22value%22%3Atrue%7D%2C%22isManufactured%22%3A%7B%22value%22%3Afalse%7D%2C%22isLotLand%22%3A%7B%22value%22%3Afalse%7D%2C%22isMultiFamily%22%3A%7B%22value%22%3Afalse%7D%2C%22monthlyPayment%22%3A%7B%22max%22%3A3500%7D%2C%22beds%22%3A%7B%22min%22%3A2%2C%22max%22%3A2%7D%2C%22baths%22%3A%7B%22min%22%3A1.0%7D%2C%22onlyRentalRequestedAvailabilityDate%22%3A%7B%22value%22%3A%222026-09-02%22%7D%2C%22isEntirePlaceForRent%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22savedSearchEnrollmentId%22%3A%22X1-SS50jb7wqdn8id1000000000_5w3uk%22%7D"
+
+
+def filter_rows(df: pd.DataFrame, target_date: str) -> pd.DataFrame:
+    df = df.copy()
+    df["availabilityDate"] = pd.to_datetime(df["availabilityDate"], errors="coerce").dt.date
+    df = df[df["availabilityDate"] == pd.Timestamp(target_date).date()].copy()
+
+    # Numeric price: prefer nested numeric field, fallback to parsed text.
+    nested = pd.to_numeric(df.get("hdpData.homeInfo.price"), errors="coerce")
+    text = pd.to_numeric(
+        df.get("price", pd.Series(index=df.index, dtype="object"))
+        .fillna("")
+        .astype(str)
+        .str.replace(r"[^0-9.]", "", regex=True)
+        .replace("", pd.NA),
+        errors="coerce",
+    )
+    df["price"] = nested.fillna(text)
+
+    avg = df["price"].mean()
+    df["price_vs_avg"] = ((df["price"] - avg) / avg * 100).round(1) if pd.notna(avg) and avg else pd.NA
+
+    cols = [
+        "zpid",
+        "imgSrc",
+        "detailUrl",
+        "price",
+        "beds",
+        "baths",
+        "area",
+        "latLong.latitude",
+        "latLong.longitude",
+        "hdpData.homeInfo.latitude",
+        "hdpData.homeInfo.longitude",
+        "hdpData.homeInfo.streetAddress",
+        "hdpData.homeInfo.city",
+        "hdpData.homeInfo.zipcode",
+        "price_vs_avg",
+        "availabilityDate",
+    ]
+    return df[[c for c in cols if c in df.columns]].copy()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Call API, filter by date, and save files.")
+    parser.add_argument("--target-date", default="2026-09-01")
+    parser.add_argument("--confirm-paid-api", action="store_true")
+    args = parser.parse_args()
+
+    if not args.confirm_paid_api:
+        raise SystemExit("Blocked paid API call. Re-run with --confirm-paid-api.")
+
+    api_key = os.getenv("SCRAPEAK_API_KEY", "")
+    if not api_key:
+        raise SystemExit("Missing SCRAPEAK_API_KEY environment variable.")
+
+    res = requests.get(API_ENDPOINT, params={"api_key": api_key, "url": LISTING_URL}, timeout=30)
+    res.raise_for_status()
+    map_results = res.json()["data"]["cat1"]["searchResults"]["mapResults"]
+    df = pd.json_normalize(map_results)
+
+    out = filter_rows(df, args.target_date)
+    out.to_csv("sept1_filtered_listings.csv", index=False)
+    out.to_json("sept1_filtered_listings.json", orient="records", indent=2, date_format="iso")
+    print(f"Saved {len(out)} rows")
+
+
+if __name__ == "__main__":
+    main()
