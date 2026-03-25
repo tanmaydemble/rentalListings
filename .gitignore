@@ -6,5 +6,5 @@ __pycache__/
 .env
 .env.*
 one.ipynb
-sept1_filtered_listings.json
-sept1_filtered_listings.csv
+!sept1_filtered_listings.csv
+!sept1_filtered_listings.json
