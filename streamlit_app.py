@@ -1,18 +1,29 @@
-import json
-from pathlib import Path
+import os
 from urllib.parse import quote_plus
 
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
 import streamlit.components.v1 as components
+from supabase import create_client
 
-DATA = Path(__file__).parent / "sept1_filtered_listings.json"
 BASE = "https://www.zillow.com"
 NEU_ADDRESS = "Northeastern University, Boston, MA"
 
 st.set_page_config(page_title="Listings", layout="wide")
 st.title("Sept 1 Rental Listings")
+
+
+@st.cache_data(ttl=86400)
+def load_listings() -> pd.DataFrame:
+    url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
+    if not url or not key:
+        st.error("Missing SUPABASE_URL or SUPABASE_KEY.")
+        st.stop()
+    client = create_client(url, key)
+    response = client.table("listings").select("*").execute()
+    return pd.DataFrame(response.data)
 
 
 def zillow(url: str) -> str:
@@ -34,8 +45,6 @@ def get_map_points(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["latitude"] = pd.to_numeric(out.get("latLong.latitude"), errors="coerce")
     out["longitude"] = pd.to_numeric(out.get("latLong.longitude"), errors="coerce")
-
-    # Fallback to homeInfo coordinates when latLong fields are missing.
     fallback_lat = pd.to_numeric(out.get("hdpData.homeInfo.latitude"), errors="coerce")
     fallback_lon = pd.to_numeric(out.get("hdpData.homeInfo.longitude"), errors="coerce")
     out["latitude"] = out["latitude"].fillna(fallback_lat)
@@ -46,7 +55,6 @@ def get_map_points(df: pd.DataFrame) -> pd.DataFrame:
 def selected_zpid_from_map_event(event) -> str | None:
     if not event:
         return None
-
     selection = getattr(event, "selection", None)
     if not selection:
         return None
@@ -66,27 +74,23 @@ def selected_zpid_from_map_event(event) -> str | None:
             zpid = _extract_from_obj(selection["objects"][0])
             if zpid:
                 return zpid
-
         for value in selection.values():
             if isinstance(value, dict):
                 if isinstance(value.get("objects"), list) and value["objects"]:
                     zpid = _extract_from_obj(value["objects"][0])
                     if zpid:
                         return zpid
-
                 if isinstance(value.get("indices"), list) and value["indices"]:
                     idx = int(value["indices"][0])
                     mapped = st.session_state.get("_mapped_points")
                     if mapped is not None and 0 <= idx < len(mapped):
                         return str(mapped.iloc[idx].get("zpid"))
-
             if isinstance(value, list) and value:
                 first = value[0]
                 if isinstance(first, dict):
                     zpid = _extract_from_obj(first)
                     if zpid:
                         return zpid
-
     return None
 
 
@@ -103,7 +107,9 @@ def render_listing_card(r: pd.Series, avg_price: float) -> None:
                 f"{r.get('hdpData.homeInfo.streetAddress', '')}, "
                 f"{r.get('hdpData.homeInfo.city', '')}, MA {r.get('hdpData.homeInfo.zipcode', '')}"
             )
-            st.write(f"Price: {'N/A' if pd.isna(r.get('price')) else f'${r.get('price'):,.0f}/mo'}")
+            price_val = r.get("price")
+            price_str = "N/A" if pd.isna(price_val) else f"${price_val:,.0f}/mo"
+            st.write(f"Price: {price_str}")
             st.write(f"Beds: {r.get('beds', 'N/A')} | Baths: {r.get('baths', 'N/A')} | Area: {r.get('area', 'N/A')}")
             if pd.notna(r.get("price")) and pd.notna(avg_price) and avg_price:
                 pct = (r["price"] - avg_price) / avg_price * 100
@@ -115,11 +121,11 @@ def render_listing_card(r: pd.Series, avg_price: float) -> None:
             st.link_button("Transit to Northeastern (Google Maps)", transit_to_neu_url(origin))
 
 
-with DATA.open("r", encoding="utf-8") as f:
-    df = pd.DataFrame(json.load(f))
+# --- Load data ---
+df = load_listings()
 
 if df.empty:
-    st.warning("No listings in JSON")
+    st.warning("No listings found in database.")
     st.stop()
 
 df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
@@ -131,21 +137,18 @@ st.write(f"Average price: {'N/A' if pd.isna(avg_price) else f'${avg_price:,.0f}'
 
 mapped = get_map_points(df)
 if mapped.empty:
-    st.warning(
-        "No coordinates in saved JSON. Re-run the data script once with --confirm-paid-api "
-        "to save lat/long fields for map view."
-    )
+    st.warning("No coordinates available for map view.")
 else:
     st.subheader("Map")
     mapped = mapped.copy()
     mapped["map_id"] = range(1, len(mapped) + 1)
     mapped["zpid"] = mapped["zpid"].astype(str)
     mapped["address"] = (
-        mapped.get("hdpData.homeInfo.streetAddress", "").fillna("")
+        mapped.get("hdpData.homeInfo.streetAddress", pd.Series(dtype=str)).fillna("")
         + ", "
-        + mapped.get("hdpData.homeInfo.city", "").fillna("")
+        + mapped.get("hdpData.homeInfo.city", pd.Series(dtype=str)).fillna("")
         + " "
-        + mapped.get("hdpData.homeInfo.zipcode", "").fillna("")
+        + mapped.get("hdpData.homeInfo.zipcode", pd.Series(dtype=str)).fillna("")
     )
     mapped["price_text"] = mapped["price"].apply(
         lambda x: "N/A" if pd.isna(x) else f"${x:,.0f}/mo"

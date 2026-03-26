@@ -2,9 +2,5 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
-.streamlit/secrets.toml
 .env
 .env.*
-one.ipynb
-!sept1_filtered_listings.csv
-!sept1_filtered_listings.json

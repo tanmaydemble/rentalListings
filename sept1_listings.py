@@ -3,6 +3,7 @@ import os
 
 import pandas as pd
 import requests
+from supabase import create_client
 
 API_ENDPOINT = "https://app.scrapeak.com/v1/scrapers/zillow/listing"
 LISTING_URL = "https://www.zillow.com/homes/for_rent/?searchQueryState=%7B%22mapBounds%22%3A%7B%22west%22%3A-71.14007799772557%2C%22east%22%3A-71.09412100227442%2C%22south%22%3A42.280931197058244%2C%22north%22%3A42.33774778867289%7D%2C%22regionSelection%22%3A%5B%7B%22regionId%22%3A154795%2C%22regionType%22%3A8%7D%5D%2C%22filterState%22%3A%7B%22isForSaleByAgent%22%3A%7B%22value%22%3Afalse%7D%2C%22isComingSoon%22%3A%7B%22value%22%3Afalse%7D%2C%22isAuction%22%3A%7B%22value%22%3Afalse%7D%2C%22isForSaleForeclosure%22%3A%7B%22value%22%3Afalse%7D%2C%22isNewConstruction%22%3A%7B%22value%22%3Afalse%7D%2C%22isForSaleByOwner%22%3A%7B%22value%22%3Afalse%7D%2C%22isForRent%22%3A%7B%22value%22%3Atrue%7D%2C%22isManufactured%22%3A%7B%22value%22%3Afalse%7D%2C%22isLotLand%22%3A%7B%22value%22%3Afalse%7D%2C%22isMultiFamily%22%3A%7B%22value%22%3Afalse%7D%2C%22monthlyPayment%22%3A%7B%22max%22%3A3500%7D%2C%22beds%22%3A%7B%22min%22%3A2%2C%22max%22%3A2%7D%2C%22baths%22%3A%7B%22min%22%3A1.0%7D%2C%22onlyRentalRequestedAvailabilityDate%22%3A%7B%22value%22%3A%222026-09-02%22%7D%2C%22isEntirePlaceForRent%22%3A%7B%22value%22%3Afalse%7D%7D%2C%22savedSearchEnrollmentId%22%3A%22X1-SS50jb7wqdn8id1000000000_5w3uk%22%7D"
@@ -13,7 +14,6 @@ def filter_rows(df: pd.DataFrame, target_date: str) -> pd.DataFrame:
     df["availabilityDate"] = pd.to_datetime(df["availabilityDate"], errors="coerce").dt.date
     df = df[df["availabilityDate"] == pd.Timestamp(target_date).date()].copy()
 
-    # Numeric price: prefer nested numeric field, fallback to parsed text.
     nested = pd.to_numeric(df.get("hdpData.homeInfo.price"), errors="coerce")
     text = pd.to_numeric(
         df.get("price", pd.Series(index=df.index, dtype="object"))
@@ -49,8 +49,28 @@ def filter_rows(df: pd.DataFrame, target_date: str) -> pd.DataFrame:
     return df[[c for c in cols if c in df.columns]].copy()
 
 
+def save_to_supabase(df: pd.DataFrame) -> None:
+    url = os.getenv("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_KEY", "")
+    if not url or not key:
+        raise SystemExit("Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
+
+    client = create_client(url, key)
+
+    # Convert date objects and NaNs to JSON-safe types
+    records = df.copy()
+    records["availabilityDate"] = records["availabilityDate"].astype(str)
+    records["zpid"] = records["zpid"].astype(str)
+    records = records.where(pd.notna(records), other=None)
+    rows = records.to_dict(orient="records")
+
+    # Upsert so re-runs update existing rows instead of failing on duplicate zpid
+    client.table("listings").upsert(rows).execute()
+    print(f"Upserted {len(rows)} rows to Supabase")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Call API, filter by date, and save files.")
+    parser = argparse.ArgumentParser(description="Call API, filter by date, and save to Supabase.")
     parser.add_argument("--target-date", default="2026-09-01")
     parser.add_argument("--confirm-paid-api", action="store_true")
     args = parser.parse_args()
@@ -68,9 +88,8 @@ def main() -> None:
     df = pd.json_normalize(map_results)
 
     out = filter_rows(df, args.target_date)
-    out.to_csv("sept1_filtered_listings.csv", index=False)
-    out.to_json("sept1_filtered_listings.json", orient="records", indent=2, date_format="iso")
-    print(f"Saved {len(out)} rows")
+    save_to_supabase(out)
+    print(f"Done. {len(out)} listings saved.")
 
 
 if __name__ == "__main__":
