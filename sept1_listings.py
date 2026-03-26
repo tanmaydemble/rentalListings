@@ -92,6 +92,7 @@ def main() -> None:
     res.raise_for_status()
     map_results = res.json()["data"]["cat1"]["searchResults"]["mapResults"]
     df = pd.json_normalize(map_results)
+    print(f"Retrieved from API: {len(df)} rows")
 
     out = filter_rows(df, args.target_date)
     save_to_supabase(out)

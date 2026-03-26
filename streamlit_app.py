@@ -11,6 +11,36 @@ BASE = "https://www.zillow.com"
 NEU_ADDRESS = "Northeastern University, Boston, MA"
 PAGE_SIZE = 15
 
+ZIPCODE_NEIGHBORHOOD = {
+    # Somerville
+    "02143": "Somerville",
+    "02144": "Somerville",
+    "02145": "Somerville",
+    # Cambridge
+    "02138": "Cambridge",
+    "02139": "Cambridge",
+    "02140": "Cambridge",
+    "02141": "Cambridge",
+    # Kendall Square
+    "02142": "Kendall Square",
+    # Charlestown / Bunker Hill
+    "02129": "Charlestown / Bunker Hill",
+    # East Boston (includes Maverick and Paris Street)
+    "02128": "East Boston",
+    # Back Bay
+    "02116": "Back Bay",
+    "02199": "Back Bay",
+    # Brookline / Coolidge Corner
+    "02445": "Coolidge Corner",
+    "02446": "Brookline",
+    "02447": "Brookline",
+    # Fenway / Kenmore
+    "02115": "Fenway / Kenmore",
+    "02215": "Fenway / Kenmore",
+    # Jamaica Plain
+    "02130": "Jamaica Plain",
+}
+
 st.set_page_config(page_title="Listings", layout="wide")
 st.title("Sept 1 Rental Listings")
 
@@ -103,10 +133,12 @@ def render_listing_card(r: pd.Series, avg_price: float) -> None:
                 st.image(r["imgSrc"], use_container_width=True)
         with c2:
             st.subheader(r.get("hdpData.homeInfo.streetAddress", "Address unavailable"))
-            st.caption(f"{r.get('hdpData.homeInfo.city', '')} {r.get('hdpData.homeInfo.zipcode', '')}")
+            zipcode = str(r.get("hdpData.homeInfo.zipcode", "")).strip()
+            neighborhood = ZIPCODE_NEIGHBORHOOD.get(zipcode, r.get("hdpData.homeInfo.city", ""))
+            st.caption(f"{neighborhood} · {zipcode}")
             origin = (
                 f"{r.get('hdpData.homeInfo.streetAddress', '')}, "
-                f"{r.get('hdpData.homeInfo.city', '')}, MA {r.get('hdpData.homeInfo.zipcode', '')}"
+                f"{r.get('hdpData.homeInfo.city', '')}, MA {zipcode}"
             )
             price_val = r.get("price")
             price_str = "N/A" if pd.isna(price_val) else f"${price_val:,.0f}/mo"
@@ -131,18 +163,73 @@ if df.empty:
 
 df["price"] = pd.to_numeric(df.get("price"), errors="coerce")
 df["area"] = pd.to_numeric(df.get("area"), errors="coerce")
+df["zipcode_str"] = df["hdpData.homeInfo.zipcode"].astype(str).str.strip()
+df["neighborhood"] = df["zipcode_str"].map(ZIPCODE_NEIGHBORHOOD).fillna(df.get("hdpData.homeInfo.city", ""))
+
 avg_price = df["price"].mean()
 
-st.write(f"Listings: {len(df)}")
-st.write(f"Average price: {'N/A' if pd.isna(avg_price) else f'${avg_price:,.0f}'}")
+# --- Filters ---
+st.subheader("Filters")
+col_price, col_neighborhood, col_sort = st.columns([1, 2, 1])
+
+with col_price:
+    max_price_input = st.text_input("Max price ($/mo)", placeholder="e.g. 3000")
+    try:
+        max_price = float(max_price_input) if max_price_input.strip() else None
+    except ValueError:
+        st.warning("Enter a valid number for max price.")
+        max_price = None
+
+with col_neighborhood:
+    available_zips = df["zipcode_str"].dropna().unique().tolist()
+    neighborhood_options = sorted(set(
+        ZIPCODE_NEIGHBORHOOD.get(z, z) for z in available_zips
+    ))
+    selected_neighborhoods = st.multiselect(
+        "Neighborhoods",
+        options=neighborhood_options,
+        placeholder="All neighborhoods",
+    )
+
+with col_sort:
+    sort_order = st.selectbox("Sort by price", ["Default", "Low to High", "High to Low"])
+
+# --- Apply filters ---
+filtered_df = df.copy()
+
+if max_price is not None:
+    filtered_df = filtered_df[filtered_df["price"].isna() | (filtered_df["price"] <= max_price)]
+
+if selected_neighborhoods:
+    filtered_df = filtered_df[filtered_df["neighborhood"].isin(selected_neighborhoods)]
+
+if sort_order == "Low to High":
+    filtered_df = filtered_df.sort_values("price", ascending=True, na_position="last")
+elif sort_order == "High to Low":
+    filtered_df = filtered_df.sort_values("price", ascending=False, na_position="last")
+
+filtered_df = filtered_df.reset_index(drop=True)
+
+st.write(f"Showing {len(filtered_df)} of {len(df)} listings · Average price: {'N/A' if pd.isna(avg_price) else f'${avg_price:,.0f}'}")
+
+if filtered_df.empty:
+    st.warning("No listings match your filters.")
+    st.stop()
 
 # --- Pagination state ---
 if "page" not in st.session_state:
     st.session_state["page"] = 0
 
-total_pages = max(1, -(-len(df) // PAGE_SIZE))
+# Reset to page 0 when filters change
+filter_key = (max_price_input, tuple(selected_neighborhoods), sort_order)
+if st.session_state.get("_last_filter_key") != filter_key:
+    st.session_state["page"] = 0
+    st.session_state["_last_filter_key"] = filter_key
+
+total_pages = max(1, -(-len(filtered_df) // PAGE_SIZE))
+st.session_state["page"] = min(st.session_state["page"], total_pages - 1)
 start = st.session_state["page"] * PAGE_SIZE
-page_df = df.iloc[start: start + PAGE_SIZE]
+page_df = filtered_df.iloc[start: start + PAGE_SIZE]
 
 # --- Map (current page only) ---
 mapped = get_map_points(page_df)
@@ -230,23 +317,26 @@ else:
         st.session_state["selected_zpid"] = selected_zpid
         st.session_state["jump_to_zpid"] = selected_zpid
 
-# --- Pagination controls (top) ---
-col1, col2, col3 = st.columns([1, 2, 1])
-with col1:
-    if st.button("← Previous", disabled=st.session_state["page"] == 0):
-        st.session_state["page"] -= 1
-        st.rerun()
-with col2:
-    st.markdown(
-        f"<div style='text-align:center; padding-top: 8px;'>Page {st.session_state['page'] + 1} of {total_pages}</div>",
-        unsafe_allow_html=True,
-    )
-with col3:
-    if st.button("Next →", disabled=st.session_state["page"] >= total_pages - 1):
-        st.session_state["page"] += 1
-        st.rerun()
 
-# --- Listing cards ---
+def pagination_controls(key_suffix: str) -> None:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        if st.button("← Previous", key=f"prev_{key_suffix}", disabled=st.session_state["page"] == 0):
+            st.session_state["page"] -= 1
+            st.rerun()
+    with col2:
+        st.markdown(
+            f"<div style='text-align:center; padding-top: 8px;'>Page {st.session_state['page'] + 1} of {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+    with col3:
+        if st.button("Next →", key=f"next_{key_suffix}", disabled=st.session_state["page"] >= total_pages - 1):
+            st.session_state["page"] += 1
+            st.rerun()
+
+
+pagination_controls("top")
+
 for _, r in page_df.iterrows():
     row_zpid = str(r.get("zpid", ""))
     st.markdown(f"<div id='listing-{row_zpid}'></div>", unsafe_allow_html=True)
@@ -254,23 +344,8 @@ for _, r in page_df.iterrows():
         st.info("Selected from map")
     render_listing_card(r, avg_price)
 
-# --- Pagination controls (bottom) ---
-col1, col2, col3 = st.columns([1, 2, 1])
-with col1:
-    if st.button("← Previous", key="prev_bottom", disabled=st.session_state["page"] == 0):
-        st.session_state["page"] -= 1
-        st.rerun()
-with col2:
-    st.markdown(
-        f"<div style='text-align:center; padding-top: 8px;'>Page {st.session_state['page'] + 1} of {total_pages}</div>",
-        unsafe_allow_html=True,
-    )
-with col3:
-    if st.button("Next →", key="next_bottom", disabled=st.session_state["page"] >= total_pages - 1):
-        st.session_state["page"] += 1
-        st.rerun()
+pagination_controls("bottom")
 
-# --- Scroll to selected listing ---
 jump_to = st.session_state.get("jump_to_zpid")
 if jump_to:
     components.html(
