@@ -57,14 +57,20 @@ def save_to_supabase(df: pd.DataFrame) -> None:
 
     client = create_client(url, key)
 
-    # Convert date objects and NaNs to JSON-safe types
     records = df.copy()
     records["availabilityDate"] = records["availabilityDate"].astype(str)
     records["zpid"] = records["zpid"].astype(str)
-    records = records.where(pd.notna(records), other=None)
-    rows = records.to_dict(orient="records")
 
-    # Upsert so re-runs update existing rows instead of failing on duplicate zpid
+    rows = []
+    for record in records.to_dict(orient="records"):
+        cleaned = {}
+        for k, v in record.items():
+            if isinstance(v, float) and (pd.isna(v) or v == float("inf") or v == float("-inf")):
+                cleaned[k] = None
+            else:
+                cleaned[k] = v
+        rows.append(cleaned)
+
     client.table("listings").upsert(rows).execute()
     print(f"Upserted {len(rows)} rows to Supabase")
 
