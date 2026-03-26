@@ -9,6 +9,7 @@ from supabase import create_client
 
 BASE = "https://www.zillow.com"
 NEU_ADDRESS = "Northeastern University, Boston, MA"
+PAGE_SIZE = 15
 
 st.set_page_config(page_title="Listings", layout="wide")
 st.title("Sept 1 Rental Listings")
@@ -135,13 +136,22 @@ avg_price = df["price"].mean()
 st.write(f"Listings: {len(df)}")
 st.write(f"Average price: {'N/A' if pd.isna(avg_price) else f'${avg_price:,.0f}'}")
 
-mapped = get_map_points(df)
+# --- Pagination state ---
+if "page" not in st.session_state:
+    st.session_state["page"] = 0
+
+total_pages = max(1, -(-len(df) // PAGE_SIZE))
+start = st.session_state["page"] * PAGE_SIZE
+page_df = df.iloc[start: start + PAGE_SIZE]
+
+# --- Map (current page only) ---
+mapped = get_map_points(page_df)
 if mapped.empty:
     st.warning("No coordinates available for map view.")
 else:
     st.subheader("Map")
     mapped = mapped.copy()
-    mapped["map_id"] = range(1, len(mapped) + 1)
+    mapped["map_id"] = range(start + 1, start + len(mapped) + 1)
     mapped["zpid"] = mapped["zpid"].astype(str)
     mapped["address"] = (
         mapped.get("hdpData.homeInfo.streetAddress", pd.Series(dtype=str)).fillna("")
@@ -220,13 +230,47 @@ else:
         st.session_state["selected_zpid"] = selected_zpid
         st.session_state["jump_to_zpid"] = selected_zpid
 
-for _, r in df.iterrows():
+# --- Pagination controls (top) ---
+col1, col2, col3 = st.columns([1, 2, 1])
+with col1:
+    if st.button("← Previous", disabled=st.session_state["page"] == 0):
+        st.session_state["page"] -= 1
+        st.rerun()
+with col2:
+    st.markdown(
+        f"<div style='text-align:center; padding-top: 8px;'>Page {st.session_state['page'] + 1} of {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
+with col3:
+    if st.button("Next →", disabled=st.session_state["page"] >= total_pages - 1):
+        st.session_state["page"] += 1
+        st.rerun()
+
+# --- Listing cards ---
+for _, r in page_df.iterrows():
     row_zpid = str(r.get("zpid", ""))
     st.markdown(f"<div id='listing-{row_zpid}'></div>", unsafe_allow_html=True)
     if st.session_state.get("selected_zpid") == row_zpid:
         st.info("Selected from map")
     render_listing_card(r, avg_price)
 
+# --- Pagination controls (bottom) ---
+col1, col2, col3 = st.columns([1, 2, 1])
+with col1:
+    if st.button("← Previous", key="prev_bottom", disabled=st.session_state["page"] == 0):
+        st.session_state["page"] -= 1
+        st.rerun()
+with col2:
+    st.markdown(
+        f"<div style='text-align:center; padding-top: 8px;'>Page {st.session_state['page'] + 1} of {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
+with col3:
+    if st.button("Next →", key="next_bottom", disabled=st.session_state["page"] >= total_pages - 1):
+        st.session_state["page"] += 1
+        st.rerun()
+
+# --- Scroll to selected listing ---
 jump_to = st.session_state.get("jump_to_zpid")
 if jump_to:
     components.html(
